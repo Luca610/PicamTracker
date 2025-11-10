@@ -7,6 +7,80 @@ from collections import deque
 from scipy.spatial import cKDTree
 from matplotlib.colors import LogNorm
 
+def plot_cluster_2d(x, y, charge, filename="cluster.png", binsize=1.0,
+                    title=None, cmap='viridis', dpi=150):
+    """
+    Plot a 2D histogram of a single cluster (pixel charge map) and save to PNG.
+
+    Parameters
+    ----------
+    x, y : array-like
+        Pixel coordinates of hits in the cluster.
+    charge : array-like
+        Charge (amplitude) values corresponding to each pixel.
+    filename : str
+        Path of the output PNG file.
+    binsize : float, optional
+        Size of each histogram bin in coordinate units (default = 1.0).
+        Set smaller to get finer resolution.
+    title : str or None
+        Optional title for the plot.
+    cmap : str
+        Matplotlib colormap name for the charge intensity (default 'viridis').
+    dpi : int
+        Output image resolution.
+    """
+
+    x = np.asarray(x)
+    y = np.asarray(y)
+    charge = np.asarray(charge)
+
+    if len(x) == 0:
+        raise ValueError("No hits in cluster — cannot plot an empty cluster.")
+
+    # Determine histogram edges based on data range
+    x_min, x_max = x.min() - 0.5*binsize, x.max() + 0.5*binsize
+    y_min, y_max = y.min() - 0.5*binsize, y.max() + 0.5*binsize
+
+    # Compute number of bins automatically
+    nx_bins = int(np.ceil((x_max - x_min) / binsize))
+    ny_bins = int(np.ceil((y_max - y_min) / binsize))
+
+    # Compute 2D charge histogram (weighted by charge)
+    H, xedges, yedges = np.histogram2d(
+        x, y, bins=(nx_bins, ny_bins),
+        range=[[x_min, x_max], [y_min, y_max]],
+        weights=charge
+    )
+
+    # Plot
+    fig, ax = plt.subplots(figsize=(6, 5))
+    im = ax.imshow(
+        H.T, origin='lower', cmap=cmap,
+        extent=[xedges[0], xedges[-1], yedges[0], yedges[-1]],
+        aspect='equal'
+    )
+
+    # Colorbar and labels
+    cbar = plt.colorbar(im, ax=ax)
+    cbar.set_label("Charge (a.u.)", fontsize=10)
+
+    ax.set_xlabel("Pixel X coordinate")
+    ax.set_ylabel("Pixel Y coordinate")
+    ax.grid(True)
+    if title is not None:
+        ax.set_title(title)
+    else:
+        ax.set_title("Cluster charge map")
+
+    # Tight layout and save
+    plt.tight_layout()
+    os.makedirs(os.path.dirname(filename) or ".", exist_ok=True)
+    plt.savefig(filename, dpi=dpi)
+    plt.close(fig)
+
+    print(f"Cluster plot saved as: {filename}")
+
 def reconstruct_clusters_kdtree(x, y, amplitude,
                                  radius=1.0,
                                  connectivity='8',
@@ -133,7 +207,8 @@ def reconstruct_clusters_kdtree(x, y, amplitude,
 
 argparse = argparse.ArgumentParser(description="Analyse source data from picamera.")
 argparse.add_argument("filename", type=str, default='input.raw', help="Path to the source data file.")
-argparse.add_argument("--clustering_threshold", type=int, default=72, help="Minimum amplitude to consider a hit for clustering.")
+argparse.add_argument("--clustering_threshold", type=int, default=73, help="Minimum amplitude to consider a hit for clustering.")
+argparse.add_argument("--plot_clusters", action="store_true")
 args = argparse.parse_args()
 file_path = args.filename
 filename = os.path.basename(file_path)
@@ -146,6 +221,7 @@ range_centroids = [[-0.5, 1331.5], [-0.5, 989.5]]
 hist_centroids_tot, xedges_centroids_tot, yedges_centroids_tot = np.histogram2d([], [], bins=bins_centroids, range=range_centroids)
 max_x = 0
 max_y = 0
+plotted_sizes = []
 with open(file_path, "rb") as infile:
     # Read the file header
     try:
@@ -161,7 +237,7 @@ with open(file_path, "rb") as infile:
             print(f"Processing frame {frame_index}", end='\r')
         # Try to read one frame header
         try:
-            timestamp, x, y, amplitudes = read_and_decode_frame(infile)
+            timestamp, y, x, amplitudes = read_and_decode_frame(infile) #TODO understand why they are swapped
         except EOFError:
             print(f"End of file reached at frame {frame_index}.")
             break
@@ -175,10 +251,30 @@ with open(file_path, "rb") as infile:
         hist_amp_tot += np.histogram(amplitudes, bins=256, range=(-0.5, 1023.5))[0]
         # Reconstruct clusters
         mask = amplitudes > clustering_threshold
-        clusters = reconstruct_clusters_kdtree(x[mask], y[mask], amplitudes[mask], radius=1., connectivity='8')
+        clusters = reconstruct_clusters_kdtree(x[mask], y[mask], amplitudes[mask], radius=1., connectivity='8', return_indices = True)
         cluster_charges = [c['charge'] for c in clusters]
         cluster_sizes = [c['size'] for c in clusters]
         centroids = [c['centroid'] for c in clusters]
+        hits = [c['hits'] for c in clusters]
+        # Optionally plot individual clusters
+        if args.plot_clusters:
+            cluster_size_max = max(cluster_sizes) if cluster_sizes else 0
+            if cluster_size_max not in plotted_sizes and cluster_size_max > 1:
+                # Find the largest cluster
+                largest_cluster_idx = np.argmax(cluster_sizes)
+                hit_indices = hits[largest_cluster_idx]
+                cluster_x = x[mask][hit_indices]
+                cluster_y = y[mask][hit_indices]
+                cluster_amplitudes = amplitudes[mask][hit_indices]
+                plot_filename = f"clusters/frame_{frame_index:05d}_size_{cluster_size_max}.png"
+                plot_title = f"Frame {frame_index}, Cluster size {cluster_size_max}"
+                plot_cluster_2d(cluster_x, cluster_y, cluster_amplitudes,
+                                filename=plot_filename,
+                                binsize=1.0,
+                                title=plot_title,
+                                cmap='viridis',
+                                dpi=150)
+                plotted_sizes.append(cluster_size_max)
         # Update cumulative cluster histograms
         hist_cluster_charge_tot += np.histogram(cluster_charges, bins=256, range=(-0.5, 2047.5))[0]
         hist_cluster_size_tot += np.histogram(cluster_sizes, bins=50, range=(0.5, 50.5))[0]
